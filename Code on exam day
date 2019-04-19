@@ -1,0 +1,339 @@
+#!/usr/bin/env python
+
+# IMPORTS
+
+import rospy
+from geometry_msgs.msg import Twist, Point
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+from tf.transformations import euler_from_quaternion
+from math import atan2, sqrt, pi, atan, cos, tan, sin, acos
+import sys,select,termios,tty
+
+
+# VARIABLES
+
+# initialse an empty list of 720 slots (this is for the laser)
+distances = [None]*720
+
+# set up message types
+vel_msg = Twist()
+goal = Point()
+
+# set up goal location
+setCoordinates = False
+temTraj = False
+# variables of current location
+x = 0
+y = 0
+theta = 0
+
+
+objectSpotted = False
+
+# write msg.range into our list of distances for use in the rest of the code
+
+# SUBSCRIBER READERS
+
+
+def LaserReadings(msg):
+    global distances
+
+    for i in range(0, 719):
+        distances[i] = msg.ranges[i]
+
+
+def newOdom(msg):
+
+    global x
+    global y
+    global theta
+
+    x = msg.pose.pose.position.x
+    y = msg.pose.pose.position.y
+
+    rot_q = msg.pose.pose.orientation
+    (roll, pitch, theta) = euler_from_quaternion(
+        [rot_q.x, rot_q.y, rot_q.z, rot_q.w])
+
+
+# STARTUP NODE
+rospy.init_node('avoider')
+velocity_publisher = rospy.Publisher('/cmd_vel_mux/input/teleop', Twist, queue_size=1)
+
+# THE SUBSCRIBERS
+rospy.Subscriber('/scan', LaserScan, LaserReadings)
+sub = rospy.Subscriber('odom', Odometry, newOdom)
+
+
+# THE METHODS
+def userCooridnates():
+    global X_goal
+    global Y_goal
+    global ignoreObstacle
+    global Docking
+    X_goal = float(input('Enter the X coordinate:  '))
+    Y_goal = float(input('Enter the Y coordinate:  '))
+    Docking = int(input('are you docking? 1 for yes:  '))
+    print('Printing type of input value')
+    print ('the X,Y coordiante you picked is:', X_goal, Y_goal)
+
+    if Docking == 1:
+        ignoreObstacle = True
+       	docking()
+    else:
+		    ignoreObstacle = False
+		
+		
+    global X_mainGoal
+    global Y_mainGoal
+    
+    local2globalCoordiates(X_goal, Y_goal)
+
+    X_mainGoal = X_goal
+    Y_mainGoal = Y_goal
+
+    global setCoordinates
+    setCoordinates = True
+
+
+def objExsist(area):
+    # 0 = boolean of object exsiting   1= left of area   2 = right of area   3 = range
+    for i in range(area[2], area[1]):
+        if distances[i] <= area[3] and distances[i] > 0.04:
+            area[0] = True
+            global objectSpotted
+            objectSpotted = True
+    # remeber the laser starts at the right and works its way left
+
+
+def resetAreaBoolean():
+    front[0] = False
+    leftMax[0] = False
+    rightMax[0] = False
+    global objectSpotted
+    objectSpotted = False
+
+
+def areaObjectFinder():
+    # set up fror distance and area parameters
+
+    # Set up ranges
+    Range = 0.4
+
+    # Robot clearnace width
+    robotWidth = 0.8
+
+    # Set up angles of areas
+    # 180/pi is to convert from radians to degrees.
+    # 4 gets is from a 180 to 720 reference.
+    # the 90 is the center of what we are doing
+    left = 719
+    right = 0
+    leftDiagFront = 470
+    rightDiagFront = 250
+    # Set up the different areas and initialise them as having no obstacles.
+    global rightMax
+    global leftMax
+    global front
+    front = [False, leftDiagFront, rightDiagFront,
+             Range]
+    leftMax = [False, left, leftDiagFront,
+               Range]
+    rightMax = [False, rightDiagFront, right,
+                Range]
+    # We then check this area for objects
+    objExsist(front)
+    objExsist(rightMax)
+    objExsist(leftMax)
+
+
+def p2pWriter():
+    inc_x = X_goal - x
+    inc_y = Y_goal - y
+    angle_to_goal = atan2(inc_y, inc_x)
+
+    # avoids gittering of the robot as it' unsure if goal is at 3.14 or -3.14
+    if abs(angle_to_goal) >= 3.0:
+        angle_to_goal = abs(angle_to_goal)
+
+    # print('the angle_to_goal = ', angle_to_goal)
+    if pi >= (angle_to_goal - theta) >= -pi:
+
+        if abs(angle_to_goal - theta) > 0.1 and (angle_to_goal - theta) >= 0:
+            vel_msg.linear.x = 0.0
+            vel_msg.angular.z = 0.25  # turns left
+        elif abs(angle_to_goal - theta) > 0.1 and (angle_to_goal - theta) < 0:
+            vel_msg.linear.x = 0.0
+            vel_msg.angular.z = -0.25  # turns right
+        else:
+           # print('correct heading, going straight')
+            vel_msg.linear.x = 0.25
+            vel_msg.angular.z = 0.0
+
+    elif (angle_to_goal - theta) < -pi or (angle_to_goal - theta) > pi:
+        if abs(angle_to_goal + theta) > 0.1 and (angle_to_goal + theta) <= 0:
+            vel_msg.linear.x = 0.0
+            vel_msg.angular.z = -0.25  # turns right
+        elif abs(angle_to_goal + theta) > 0.1 and (angle_to_goal + theta) > 0:
+            vel_msg.linear.x = 0.0
+            vel_msg.angular.z = 0.25  # turns left
+        else:
+            print('correct heading, going straight')
+            vel_msg.linear.x = 0.25
+            vel_msg.angular.z = 0.0
+
+
+def seekTheTea():
+    inc_x = X_goal - x
+    inc_y = Y_goal - y
+    global ignoreObstacle
+    global setCoordinates
+    global Docking
+    
+    # we check if objects exsist in areas
+    areaObjectFinder()
+    # we check if we are at the goal
+    if sqrt(inc_y*inc_y + inc_x*inc_x) <= 0.5:
+    		ignoreObstacle = True
+    
+    print('are we docking ?:', Docking, 'we are at  ',sqrt(inc_y*inc_y + inc_x*inc_x)+0.08, ' from goal')
+    if Docking == int(1)and (sqrt(inc_y*inc_y + inc_x*inc_x)+0.08 <= 0.04):
+				    setCoordinates = False
+				    print ('we docking')
+				    vel_msg.linear.x = 0.0
+				    vel_msg.angular.z = 0.0
+				
+    elif (sqrt(inc_y*inc_y + inc_x*inc_x)) <= 0.2:
+        global temTraj
+        if temTraj is False:
+            global setCoordinates
+            setCoordinates = False
+            print ('we have arrived at the goal')
+            vel_msg.linear.x = 0.0
+            vel_msg.angular.z = 0.0
+        else:
+            temTraj = False
+            print ('we have arrived at the subGoal')
+            vel_msg.linear.x = 0.0
+            vel_msg.angular.z = 0.0
+            backToGlobalPlan()
+
+    elif objectSpotted is True and ignoreObstacle is False:
+        obectAvoidanceManager()
+    else:
+        p2pWriter()
+    resetAreaBoolean()
+    velocity_publisher.publish(vel_msg)
+
+
+def obectAvoidanceManager():
+    inc_x = X_goal - x
+    inc_y = Y_goal - y
+    angle_to_goal = atan2(inc_y, inc_x)
+
+    if pi/2 >= (angle_to_goal - theta) >= -pi/2:
+        bestTempPath()
+    else:
+        # checkPath()
+        bestTempPath()
+
+def docking():
+		print (' DOCKING MODE ACTIVATED')
+		print (' if you are findinshed docking type 9 to terminate procedure')
+		print (' ')
+		print (' ')
+		print (' 1 forward      2 Reverse')
+		print (' 3 Left      4 Right')
+		userinput = '0'
+		while userinput != 9:
+				userinput = int(raw_input('Enter command:  '))
+				if userinput is 1:
+						vel_msg.linear.x = 0.1
+						vel_msg.angular.z = 0.0
+						velocity_publisher.publish(vel_msg) 
+
+				elif userinput is 2:
+						vel_msg.linear.x = -0.1
+						vel_msg.angular.z = 0.0
+						velocity_publisher.publish(vel_msg) 
+
+				elif userinput is 3:
+						vel_msg.linear.x = 0.0
+						vel_msg.angular.z = 0.3
+						velocity_publisher.publish(vel_msg) 
+						
+
+				elif userinput is 4:
+						vel_msg.linear.x = 0.0
+						vel_msg.angular.z = -0.3
+						velocity_publisher.publish(vel_msg) 
+						
+				 
+		print (' ')
+		print (' thank you for using Docking')
+
+
+def bestTempPath():
+    if front[0] is True and leftMax[0] is True and rightMax[0] is True:
+         # set forward speed
+        vel_msg.linear.x = 0
+
+        # set truning speed
+        vel_msg.angular.z = -0.25  # turn right
+
+    # if you are stuck in a leftwards corner
+    elif front[0] is True and leftMax[0] is True:
+         # set forward speed
+        vel_msg.linear.x = 0
+
+        # set truning speed
+        vel_msg.angular.z = -0.25
+
+    # if stuck in a rightwards corner
+    elif front[0] is True and rightMax[0] is True:
+         # set forward speed
+        vel_msg.linear.x = 0
+
+        # set truning speed
+        vel_msg.angular.z = 0.25  # turn left
+        
+    else:
+         # set forward speed
+        vel_msg.linear.x = 0.25
+
+        # set truning speed
+        vel_msg.angular.z = 0  # turn left
+        
+# translate from robot coordiants to global
+def local2globalCoordiates(X_local, Y_local):
+    # for X_local
+    xy = X_local*sin(theta)  # the y
+    xx = X_local*cos(theta)  # the x
+
+    # for Y_local
+    yy = Y_local*sin(theta+(pi/2))  # the y
+    yx = Y_local*cos(theta+(pi/2))  # the x
+
+    # set goals
+    global X_goal
+    global Y_goal
+
+    # we add as well x,y of the robots position (as we don't move from 00)
+    Y_goal = xy + yy + y
+    X_goal = xx + yx + x
+    print('xx: ', xx, ' yx: ', yx, ' x: ', x)
+
+def backToGlobalPlan():
+    # we are going back to the MAIN plan
+    global X_goal
+    global Y_goal
+    X_goal = X_mainGoal
+    Y_goal = Y_mainGoal
+
+
+while not rospy.is_shutdown():
+    rospy.sleep(0.1)
+    if setCoordinates is False:
+        userCooridnates()
+seekTheTea()
